@@ -14,6 +14,8 @@
   // エディタのDOM要素への参照
   let editorEl = $state(null);
 
+  let initialContent = $state("");
+
   // 自動保存用タイマー
   let saveTimer = null;
 
@@ -68,12 +70,17 @@
       console.error("メモの取得に失敗しました", error);
     } else {
       title = data.title;
-      if (editorEl) {
-        editorEl.innerHTML = data.content;
-      }
+      initialContent = data.content;
     }
 
     loading = false;
+  });
+
+  // editorElとinitialContentが揃ったらHTMLをセットする
+  $effect(() => {
+    if (editorEl && initialContent) {
+      editorEl.innerHTML = initialContent;
+    }
   });
 
   // 太字を適用する
@@ -138,7 +145,6 @@
   // Supabaseにメモを保存する
   async function saveMemo() {
     saveStatus = "保存中...";
-
     const { error } = await supabase
       .from("memos")
       .update({
