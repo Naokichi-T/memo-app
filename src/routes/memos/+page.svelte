@@ -6,6 +6,11 @@
   let memos = $state([]);
   let loading = $state(true);
 
+  // ドラッグ中のメモのインデックス
+  let dragIndex = $state(null);
+  // ドロップ先のインデックス
+  let dropIndex = $state(null);
+
   // ページ表示時にメモ一覧を取得する
   onMount(async () => {
     await loadMemos();
@@ -40,7 +45,6 @@
       data: { session },
     } = await supabase.auth.getSession();
 
-    // sort_orderは現在の最大値+1にする
     const maxOrder = memos.length > 0 ? Math.max(...memos.map((m) => m.sort_order)) : 0;
 
     const { data, error } = await supabase
@@ -57,16 +61,13 @@
     if (error) {
       console.error("メモの作成に失敗しました", error);
     } else {
-      // 作成したメモのエディタへ移動
       window.location.href = `/memos/${data.id}`;
     }
   }
 
   // メモを削除する
   async function deleteMemo(event, id) {
-    // クリックがメモ本体に伝わらないようにする
     event.stopPropagation();
-
     if (!confirm("このメモを削除しますか？")) return;
 
     const { error } = await supabase.from("memos").delete().eq("id", id);
@@ -74,7 +75,6 @@
     if (error) {
       console.error("メモの削除に失敗しました", error);
     } else {
-      // 画面から該当メモを取り除く
       memos = memos.filter((m) => m.id !== id);
     }
   }
@@ -83,6 +83,63 @@
   async function logout() {
     await supabase.auth.signOut();
     window.location.href = "/login";
+  }
+
+  // ---- ドラッグ＆ドロップ ----
+
+  // ドラッグ開始時の処理
+  function handleDragStart(index) {
+    dragIndex = index;
+  }
+
+  // ドラッグ中に別のメモの上に重なったときの処理
+  function handleDragOver(event, index) {
+    // デフォルトのドロップ禁止を解除する
+    event.preventDefault();
+    dropIndex = index;
+  }
+
+  // ドラッグがメモ一覧から外れたときの処理
+  function handleDragLeave() {
+    dropIndex = null;
+  }
+
+  // ドロップ時の処理
+  async function handleDrop(event, index) {
+    event.preventDefault();
+
+    if (dragIndex === null || dragIndex === index) {
+      dragIndex = null;
+      dropIndex = null;
+      return;
+    }
+
+    // 配列の順番を入れ替える
+    const newMemos = [...memos];
+    const [moved] = newMemos.splice(dragIndex, 1);
+    newMemos.splice(index, 0, moved);
+
+    // sort_orderを1から振り直す
+    const updated = newMemos.map((m, i) => ({ ...m, sort_order: i + 1 }));
+    memos = updated;
+
+    dragIndex = null;
+    dropIndex = null;
+
+    // Supabaseに保存する
+    await saveSortOrder(updated);
+  }
+
+  // ドラッグ終了時の処理（ドロップ外でも呼ばれる）
+  function handleDragEnd() {
+    dragIndex = null;
+    dropIndex = null;
+  }
+
+  // sort_orderをSupabaseに一括保存する
+  async function saveSortOrder(updatedMemos) {
+    const updates = updatedMemos.map((m) => supabase.from("memos").update({ sort_order: m.sort_order }).eq("id", m.id));
+    await Promise.all(updates);
   }
 </script>
 
@@ -100,14 +157,36 @@
   {:else if memos.length === 0}
     <p class="message">メモがありません。新規作成してみましょう！</p>
   {:else}
-    <ul class="memo-list">
-      {#each memos as memo (memo.id)}
-        <li class="memo-item" onclick={() => (window.location.href = `/memos/${memo.id}`)}>
+    <div class="memo-list">
+      {#each memos as memo, i (memo.id)}
+        {#if dropIndex === i && dragIndex !== i}
+          <div class="drop-line"></div>
+        {/if}
+
+        <div
+          class="memo-item"
+          class:dragging={dragIndex === i}
+          role="button"
+          tabindex="0"
+          draggable="true"
+          ondragstart={() => handleDragStart(i)}
+          ondragover={(e) => handleDragOver(e, i)}
+          ondragleave={handleDragLeave}
+          ondrop={(e) => handleDrop(e, i)}
+          ondragend={handleDragEnd}
+          onclick={() => (window.location.href = `/memos/${memo.id}`)}
+          onkeydown={(e) => e.key === "Enter" && (window.location.href = `/memos/${memo.id}`)}
+        >
+          <span class="drag-handle">⠿</span>
           <span class="memo-title">{memo.title || "無題のメモ"}</span>
           <button class="delete-btn" onclick={(e) => deleteMemo(e, memo.id)}>🗑</button>
-        </li>
+        </div>
       {/each}
-    </ul>
+
+      {#if dropIndex === memos.length && dragIndex !== memos.length - 1}
+        <div class="drop-line"></div>
+      {/if}
+    </div>
   {/if}
 </div>
 
@@ -172,19 +251,39 @@
   .memo-item {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    gap: 8px;
     padding: 16px;
     background: white;
     border-radius: 8px;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
     cursor: pointer;
+    /* ドラッグ中の見た目をなめらかにする */
+    transition: opacity 0.15s;
   }
 
   .memo-item:hover {
     background: #f0f7ff;
   }
 
+  /* ドラッグ中のメモを半透明にする */
+  .memo-item.dragging {
+    opacity: 0.4;
+  }
+
+  .drag-handle {
+    color: #ccc;
+    cursor: grab;
+    font-size: 18px;
+    padding: 0 4px;
+    user-select: none;
+  }
+
+  .drag-handle:active {
+    cursor: grabbing;
+  }
+
   .memo-title {
+    flex: 1;
     font-size: 16px;
   }
 
@@ -201,6 +300,14 @@
   .delete-btn:hover {
     opacity: 1;
     background: #ffe5e5;
+  }
+
+  /* ドロップ位置を示すライン */
+  .drop-line {
+    height: 3px;
+    background: #4a90e2;
+    border-radius: 2px;
+    margin: -4px 0;
   }
 
   .message {
