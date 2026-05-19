@@ -2,24 +2,236 @@
   import { onMount } from "svelte";
   import { supabase } from "$lib/supabase";
 
-  // メモ一覧の状態管理
-  let memos = $state([]);
-  let loading = $state(true);
+  // -----------------------------------------------
+  // localStorageのキー定数
+  // -----------------------------------------------
+  const STORAGE_KEY = "memo-open-tabs";
+  const ACTIVE_TAB_KEY = "memo-active-tab"; // 最後にアクティブだったタブのID
 
-  // ドラッグ中のメモのインデックス
-  let dragIndex = $state(null);
-  // ドロップ先のインデックス
-  let dropIndex = $state(null);
+  // -----------------------------------------------
+  // タブ管理
+  // -----------------------------------------------
+  // 開いているタブのリスト { id, title }
+  let openTabs = $state([]);
 
-  // ページ表示時にメモ一覧を取得する
+  // アクティブなタブのID
+  let activeTabId = $state("");
+
+  // -----------------------------------------------
+  // メモキャッシュ
+  // { [id]: { title: string, content: string } }
+  // -----------------------------------------------
+  let memoCache = $state({});
+
+  // -----------------------------------------------
+  // エディタの状態管理
+  // -----------------------------------------------
+  // 現在表示中のタイトル
+  let title = $state("");
+
+  // 保存状態の表示
+  let saveStatus = $state("");
+
+  // エディタのDOM要素への参照
+  let editorEl = $state(null);
+
+  // 自動保存用タイマー
+  let saveTimer = null;
+
+  // -----------------------------------------------
+  // カラーパレットの定義
+  // -----------------------------------------------
+  const colors = [
+    { label: "黒", value: "#000000" },
+    { label: "赤", value: "#e53935" },
+    { label: "オレンジ", value: "#fb8c00" },
+    { label: "黄色", value: "#fdd835" },
+    { label: "緑", value: "#43a047" },
+    { label: "青", value: "#1e88e5" },
+    { label: "ピンク", value: "#e91e63" },
+    { label: "紫", value: "#8e24aa" },
+    { label: "グレー", value: "#757575" },
+  ];
+
+  // -----------------------------------------------
+  // フォントサイズの状態管理（デフォルト18px）
+  // -----------------------------------------------
+  let fontSize = $state(18);
+
+  // テキスト選択範囲を保存する変数
+  let savedRange = null;
+  let activeSpan = null;
+
+  // -----------------------------------------------
+  // localStorageにタブリストを保存する
+  // -----------------------------------------------
+  function saveTabsToStorage(tabs) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(tabs));
+  }
+
+  // -----------------------------------------------
+  // localStorageからタブリストを読み込む
+  // -----------------------------------------------
+  function loadTabsFromStorage() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+
+  // -----------------------------------------------
+  // Supabaseから1件のメモを取得してキャッシュに保存する
+  // -----------------------------------------------
+  async function fetchAndCacheMemo(id) {
+    // すでにキャッシュ済みならスキップ
+    if (memoCache[id]) return;
+
+    const { data, error } = await supabase.from("memos").select("title, content").eq("id", id).single();
+
+    if (error) {
+      console.error(`メモの取得に失敗しました id=${id}`, error);
+      return;
+    }
+
+    // キャッシュに保存する
+    memoCache = {
+      ...memoCache,
+      [id]: { title: data.title ?? "", content: data.content ?? "" },
+    };
+
+    // タブのタイトルも最新に更新する
+    openTabs = openTabs.map((t) => (t.id === id ? { ...t, title: data.title ?? "無題" } : t));
+  }
+
+  // -----------------------------------------------
+  // Supabaseに新規メモを作成してそのIDを返す
+  // -----------------------------------------------
+  async function createNewMemo() {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    const { data, error } = await supabase.from("memos").insert({ title: "無題", content: "", user_id: session.user.id }).select("id").single();
+
+    if (error) {
+      console.error("新規メモの作成に失敗しました", error);
+      return null;
+    }
+    return data.id;
+  }
+
+  // -----------------------------------------------
+  // エディタにアクティブタブのメモを表示する
+  // -----------------------------------------------
+  function loadEditorFromCache(id) {
+    const cached = memoCache[id];
+    if (!cached) return;
+
+    // タイトルをセット
+    title = cached.title;
+
+    // エディタ本文をセット
+    if (editorEl) {
+      editorEl.innerHTML = cached.content;
+    }
+  }
+
+  // -----------------------------------------------
+  // タブをクリックしたときの処理
+  // -----------------------------------------------
+  function switchTab(id) {
+    // 切り替え前に現在の内容をキャッシュに保存する
+    if (activeTabId && editorEl) {
+      memoCache = {
+        ...memoCache,
+        [activeTabId]: {
+          ...memoCache[activeTabId],
+          title,
+          content: editorEl.innerHTML,
+        },
+      };
+    }
+
+    // アクティブタブを切り替える
+    activeTabId = id;
+
+    // 最後にアクティブだったタブのIDをlocalStorageに保存する
+    localStorage.setItem(ACTIVE_TAB_KEY, id);
+
+    // キャッシュからエディタに表示する
+    loadEditorFromCache(id);
+  }
+
+  // -----------------------------------------------
+  // ＋ボタン：新規メモを作成してタブに追加する
+  // -----------------------------------------------
+  async function addTab() {
+    const newId = await createNewMemo();
+    if (!newId) return;
+
+    // キャッシュに空のメモを登録する
+    memoCache = {
+      ...memoCache,
+      [newId]: { title: "無題", content: "" },
+    };
+
+    // タブリストに追加する
+    openTabs = [...openTabs, { id: newId, title: "無題" }];
+    saveTabsToStorage(openTabs);
+
+    // 新しいタブに切り替える
+    switchTab(newId);
+  }
+
+  // -----------------------------------------------
+  // ×ボタン：タブを閉じる
+  // -----------------------------------------------
+  async function closeTab(id) {
+    const index = openTabs.findIndex((t) => t.id === id);
+
+    // タブリストから削除する
+    openTabs = openTabs.filter((t) => t.id !== id);
+    saveTabsToStorage(openTabs);
+
+    // キャッシュからも削除する
+    const { [id]: _, ...rest } = memoCache;
+    memoCache = rest;
+
+    // 閉じたのがアクティブタブだった場合は別のタブに切り替える
+    if (id === activeTabId) {
+      if (openTabs.length === 0) {
+        // タブが0件になったら新規メモを作成する
+        await addTab();
+      } else {
+        // 閉じたタブの1つ前（なければ先頭）に切り替える
+        const nextTab = openTabs[Math.max(0, index - 1)];
+        switchTab(nextTab.id);
+      }
+    }
+  }
+
+  // -----------------------------------------------
+  // ページ表示時の初期化処理
+  // -----------------------------------------------
   onMount(async () => {
-    await loadMemos();
-  });
+    // エディタ内の選択範囲が変わるたびに保存する
+    document.addEventListener("selectionchange", () => {
+      const sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      if (editorEl && editorEl.contains(range.commonAncestorContainer)) {
+        const selectedText = range.toString();
+        if (savedRange && savedRange.toString() !== selectedText) {
+          activeSpan = null;
+        }
+        savedRange = range.cloneRange();
+      }
+    });
 
-  // Supabaseからメモ一覧を取得する
-  async function loadMemos() {
-    loading = true;
-
+    // 認証チェック
     const {
       data: { session },
     } = await supabase.auth.getSession();
@@ -28,291 +240,435 @@
       return;
     }
 
-    const { data, error } = await supabase.from("memos").select("id, title, sort_order").order("sort_order", { ascending: true });
+    // localStorageからタブリストを復元する
+    let savedTabs = loadTabsFromStorage();
 
-    if (error) {
-      console.error("メモの取得に失敗しました", error);
-    } else {
-      memos = data;
+    // タブが0件なら新規メモを作成する
+    if (savedTabs.length === 0) {
+      const newId = await createNewMemo();
+      if (!newId) return;
+      savedTabs = [{ id: newId, title: "無題" }];
     }
 
-    loading = false;
-  }
+    openTabs = savedTabs;
+    saveTabsToStorage(openTabs);
 
-  // 新規メモを作成してエディタへ移動する
-  async function createMemo() {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
+    // 最後にアクティブだったタブのIDをlocalStorageから復元する
+    const savedActiveId = localStorage.getItem(ACTIVE_TAB_KEY);
 
-    const maxOrder = memos.length > 0 ? Math.max(...memos.map((m) => m.sort_order)) : 0;
+    // localStorageの値は文字列なので数値に変換して比較する
+    const savedActiveIdNum = savedActiveId ? Number(savedActiveId) : null;
+    const initialId = savedActiveIdNum && openTabs.some((t) => t.id === savedActiveIdNum) ? savedActiveIdNum : openTabs[0].id;
 
-    const { data, error } = await supabase
-      .from("memos")
-      .insert({
-        user_id: session.user.id,
-        title: "無題のメモ",
-        content: "",
-        sort_order: maxOrder + 1,
-      })
-      .select()
-      .single();
+    activeTabId = initialId;
 
-    if (error) {
-      console.error("メモの作成に失敗しました", error);
-    } else {
-      window.location.href = `/memos/${data.id}`;
+    // アクティブタブのメモを先に取得してエディタに表示する
+    await fetchAndCacheMemo(activeTabId);
+    loadEditorFromCache(activeTabId);
+
+    // バックグラウンドで残りのタブのメモを順次取得する
+    for (const tab of openTabs.filter((t) => t.id !== activeTabId)) {
+      fetchAndCacheMemo(tab.id);
     }
+  });
+
+  // -----------------------------------------------
+  // 太字を適用する
+  // -----------------------------------------------
+  function applyBold() {
+    if (!savedRange) return;
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+    document.execCommand("bold");
+    scheduleAutoSave();
   }
 
-  // メモを削除する
-  async function deleteMemo(event, id) {
-    event.stopPropagation();
-    if (!confirm("このメモを削除しますか？")) return;
-
-    const { error } = await supabase.from("memos").delete().eq("id", id);
-
-    if (error) {
-      console.error("メモの削除に失敗しました", error);
-    } else {
-      memos = memos.filter((m) => m.id !== id);
-    }
+  // -----------------------------------------------
+  // 文字色を適用する
+  // -----------------------------------------------
+  function applyColor(colorValue) {
+    if (!savedRange) return;
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+    document.execCommand("foreColor", false, colorValue);
+    scheduleAutoSave();
   }
 
-  // ログアウトする
-  async function logout() {
-    await supabase.auth.signOut();
-    window.location.href = "/login";
-  }
+  // -----------------------------------------------
+  // フォントサイズを適用する
+  // -----------------------------------------------
+  function applyFontSize(newSize) {
+    fontSize = Math.min(72, Math.max(8, newSize));
 
-  // ---- ドラッグ＆ドロップ ----
-
-  // ドラッグ開始時の処理
-  function handleDragStart(index) {
-    dragIndex = index;
-  }
-
-  // ドラッグ中に別のメモの上に重なったときの処理
-  function handleDragOver(event, index) {
-    // デフォルトのドロップ禁止を解除する
-    event.preventDefault();
-    dropIndex = index;
-  }
-
-  // ドラッグがメモ一覧から外れたときの処理
-  function handleDragLeave() {
-    dropIndex = null;
-  }
-
-  // ドロップ時の処理
-  async function handleDrop(event, index) {
-    event.preventDefault();
-
-    if (dragIndex === null || dragIndex === index) {
-      dragIndex = null;
-      dropIndex = null;
+    if (activeSpan && editorEl.contains(activeSpan)) {
+      activeSpan.style.fontSize = fontSize + "px";
+      scheduleAutoSave();
       return;
     }
 
-    // 配列の順番を入れ替える
-    const newMemos = [...memos];
-    const [moved] = newMemos.splice(dragIndex, 1);
-    newMemos.splice(index, 0, moved);
+    if (!savedRange || savedRange.collapsed) return;
 
-    // sort_orderを1から振り直す
-    const updated = newMemos.map((m, i) => ({ ...m, sort_order: i + 1 }));
-    memos = updated;
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(savedRange);
+    const range = sel.getRangeAt(0);
+    const span = document.createElement("span");
+    span.style.fontSize = fontSize + "px";
+    try {
+      range.surroundContents(span);
+      activeSpan = span;
+    } catch (e) {
+      // 複数ノードにまたがる選択の場合はスキップ
+    }
 
-    dragIndex = null;
-    dropIndex = null;
-
-    // Supabaseに保存する
-    await saveSortOrder(updated);
+    scheduleAutoSave();
   }
 
-  // ドラッグ終了時の処理（ドロップ外でも呼ばれる）
-  function handleDragEnd() {
-    dragIndex = null;
-    dropIndex = null;
+  // -----------------------------------------------
+  // 入力が止まったら1.5秒後に自動保存する
+  // -----------------------------------------------
+  function scheduleAutoSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveMemo();
+    }, 1500);
   }
 
-  // sort_orderをSupabaseに一括保存する
-  async function saveSortOrder(updatedMemos) {
-    const updates = updatedMemos.map((m) => supabase.from("memos").update({ sort_order: m.sort_order }).eq("id", m.id));
-    await Promise.all(updates);
+  // -----------------------------------------------
+  // Supabaseにメモを保存する
+  // -----------------------------------------------
+  async function saveMemo() {
+    if (!activeTabId) return;
+
+    saveStatus = "保存中...";
+
+    // 現在の内容をキャッシュにも反映する
+    memoCache = {
+      ...memoCache,
+      [activeTabId]: {
+        title,
+        content: editorEl ? editorEl.innerHTML : "",
+      },
+    };
+
+    // タブのタイトルも更新する
+    openTabs = openTabs.map((t) => (t.id === activeTabId ? { ...t, title: title || "無題" } : t));
+    saveTabsToStorage(openTabs);
+
+    const { error } = await supabase
+      .from("memos")
+      .update({
+        title,
+        content: editorEl ? editorEl.innerHTML : "",
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", activeTabId);
+
+    if (error) {
+      console.error("保存に失敗しました", error);
+      saveStatus = "保存失敗";
+    } else {
+      saveStatus = "保存しました";
+      setTimeout(() => {
+        saveStatus = "";
+      }, 2000);
+    }
   }
 </script>
 
+<!-- タブバー -->
+<div class="tab-bar">
+  {#each openTabs as tab}
+    <button class="tab" class:active={tab.id === activeTabId} onclick={() => switchTab(tab.id)}>
+      <span class="tab-title">{tab.title || "無題"}</span>
+      <span
+        class="tab-close"
+        role="button"
+        tabindex="0"
+        aria-label="タブを閉じる"
+        onclick={(e) => {
+          e.stopPropagation();
+          closeTab(tab.id);
+        }}
+        onkeydown={(e) => {
+          if (e.key === "Enter") {
+            e.stopPropagation();
+            closeTab(tab.id);
+          }
+        }}>×</span
+      >
+    </button>
+  {/each}
+
+  <!-- ＋ボタン -->
+  <button class="tab-add" onclick={addTab}>＋</button>
+</div>
+
+<!-- エディタエリア -->
 <div class="container">
   <header>
-    <h1>📝 メモ一覧</h1>
-    <div class="header-actions">
-      <button class="create-btn" onclick={createMemo}>＋ 新規作成</button>
-      <button class="logout-btn" onclick={logout}>ログアウト</button>
-    </div>
+    <span class="save-status">{saveStatus}</span>
   </header>
 
-  {#if loading}
-    <p class="message">読み込み中...</p>
-  {:else if memos.length === 0}
-    <p class="message">メモがありません。新規作成してみましょう！</p>
-  {:else}
-    <div class="memo-list">
-      {#each memos as memo, i (memo.id)}
-        {#if dropIndex === i && dragIndex !== i}
-          <div class="drop-line"></div>
-        {/if}
+  <!-- タイトル入力 -->
+  <input class="title-input" type="text" bind:value={title} placeholder="タイトルを入力" oninput={scheduleAutoSave} />
 
-        <div
-          class="memo-item"
-          class:dragging={dragIndex === i}
-          role="button"
-          tabindex="0"
-          draggable="true"
-          ondragstart={() => handleDragStart(i)}
-          ondragover={(e) => handleDragOver(e, i)}
-          ondragleave={handleDragLeave}
-          ondrop={(e) => handleDrop(e, i)}
-          ondragend={handleDragEnd}
-          onclick={() => (window.location.href = `/memos/${memo.id}`)}
-          onkeydown={(e) => e.key === "Enter" && (window.location.href = `/memos/${memo.id}`)}
-        >
-          <span class="drag-handle">⠿</span>
-          <span class="memo-title">{memo.title || "無題のメモ"}</span>
-          <button class="delete-btn" onclick={(e) => deleteMemo(e, memo.id)}>🗑</button>
-        </div>
-      {/each}
+  <!-- ツールバー -->
+  <div class="toolbar">
+    <!-- 太字ボタン -->
+    <button class="tool-btn bold-btn" onmousedown={(e) => e.preventDefault()} onclick={applyBold}>B</button>
 
-      {#if dropIndex === memos.length && dragIndex !== memos.length - 1}
-        <div class="drop-line"></div>
-      {/if}
+    <div class="divider"></div>
+
+    <!-- カラーパレット -->
+    {#each colors as color}
+      <button class="color-btn" style="background: {color.value}" title={color.label} onmousedown={(e) => e.preventDefault()} onclick={() => applyColor(color.value)}></button>
+    {/each}
+
+    <div class="divider"></div>
+
+    <!-- フォントサイズ -->
+    <div class="font-size-control">
+      <button class="size-btn" onmousedown={(e) => e.preventDefault()} onclick={() => applyFontSize(fontSize - 2)}>▼</button>
+      <span class="size-display">{fontSize}px</span>
+      <button class="size-btn" onmousedown={(e) => e.preventDefault()} onclick={() => applyFontSize(fontSize + 2)}>▲</button>
     </div>
-  {/if}
+  </div>
+
+  <!-- エディタ本文 -->
+  <div class="editor" role="textbox" aria-multiline="true" tabindex="0" bind:this={editorEl} contenteditable="true" oninput={scheduleAutoSave}></div>
 </div>
 
 <style>
+  /* -----------------------------------------------
+     タブバー
+  ----------------------------------------------- */
+  .tab-bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    padding: 8px 16px 0;
+    background: #f5f5f5;
+    border-bottom: 2px solid #ddd;
+    overflow-x: auto;
+  }
+
+  .tab {
+    position: relative;
+    display: flex;
+    align-items: center;
+    padding: 6px 14px;
+    background: #e0e0e0;
+    border: 1px solid #ccc;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    cursor: pointer;
+    font-size: 13px;
+    color: #555;
+    white-space: nowrap;
+    max-width: 160px;
+    min-width: 0;
+    overflow: hidden;
+    transition: background 0.15s;
+  }
+
+  .tab.active {
+    background: white;
+    color: #111;
+    font-weight: bold;
+    border-color: #ddd;
+    position: relative;
+    bottom: -2px;
+  }
+
+  .tab:hover:not(.active) {
+    background: #ececec;
+  }
+
+  .tab-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
+  }
+
+  .tab-close {
+    position: absolute;
+    right: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 12px;
+    color: #666;
+    line-height: 1;
+    padding: 2px 4px;
+    border-radius: 3px;
+    background: #e0e0e0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    border: none;
+    cursor: pointer;
+  }
+
+  .tab:hover .tab-close {
+    opacity: 1;
+  }
+
+  .tab.active .tab-close {
+    background: white;
+  }
+
+  .tab-close:hover {
+    background: #ccc;
+    color: #333;
+  }
+
+  .tab-add {
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    color: #888;
+    border-radius: 4px;
+    line-height: 1;
+    margin-bottom: 2px;
+  }
+
+  .tab-add:hover {
+    background: #e0e0e0;
+    color: #333;
+  }
+
+  /* -----------------------------------------------
+     メインコンテンツ
+  ----------------------------------------------- */
   .container {
-    max-width: 600px;
+    max-width: 800px;
     margin: 0 auto;
     padding: 24px 16px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
   }
 
   header {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
   }
 
-  h1 {
+  .save-status {
+    font-size: 13px;
+    color: #999;
+  }
+
+  .title-input {
+    width: 100%;
     font-size: 24px;
-  }
-
-  .header-actions {
-    display: flex;
-    gap: 8px;
-  }
-
-  .create-btn {
-    padding: 8px 16px;
-    background: #4a90e2;
-    color: white;
+    font-weight: bold;
     border: none;
-    border-radius: 6px;
-    font-size: 14px;
-    cursor: pointer;
-  }
-
-  .create-btn:hover {
-    background: #357abd;
-  }
-
-  .logout-btn {
-    padding: 8px 16px;
+    outline: none;
     background: transparent;
-    color: #999;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    font-size: 14px;
-    cursor: pointer;
+    margin-bottom: 16px;
+    padding: 8px 0;
+    border-bottom: 1px solid #eee;
   }
 
-  .logout-btn:hover {
-    background: #f5f5f5;
-  }
-
-  .memo-list {
-    list-style: none;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .memo-item {
+  /* ツールバー */
+  .toolbar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 16px;
+    gap: 6px;
+    padding: 8px 12px;
     background: white;
+    border: 1px solid #eee;
     border-radius: 8px;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
-    cursor: pointer;
-    /* ドラッグ中の見た目をなめらかにする */
-    transition: opacity 0.15s;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
   }
 
-  .memo-item:hover {
-    background: #f0f7ff;
-  }
-
-  /* ドラッグ中のメモを半透明にする */
-  .memo-item.dragging {
-    opacity: 0.4;
-  }
-
-  .drag-handle {
-    color: #ccc;
-    cursor: grab;
-    font-size: 18px;
-    padding: 0 4px;
-    user-select: none;
-  }
-
-  .drag-handle:active {
-    cursor: grabbing;
-  }
-
-  .memo-title {
-    flex: 1;
-    font-size: 16px;
-  }
-
-  .delete-btn {
-    background: transparent;
-    border: none;
-    font-size: 18px;
-    cursor: pointer;
-    padding: 4px 8px;
+  .tool-btn {
+    padding: 4px 10px;
+    border: 1px solid #ddd;
     border-radius: 4px;
-    opacity: 0.5;
+    background: white;
+    cursor: pointer;
+    font-size: 14px;
   }
 
-  .delete-btn:hover {
-    opacity: 1;
-    background: #ffe5e5;
+  .tool-btn:hover {
+    background: #f0f0f0;
   }
 
-  /* ドロップ位置を示すライン */
-  .drop-line {
-    height: 3px;
-    background: #4a90e2;
-    border-radius: 2px;
-    margin: -4px 0;
+  .bold-btn {
+    font-weight: bold;
   }
 
-  .message {
+  .color-btn {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 0, 0, 0.15);
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .color-btn:hover {
+    transform: scale(1.2);
+    border-color: rgba(0, 0, 0, 0.4);
+  }
+
+  .font-size-control {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .size-btn {
+    padding: 2px 6px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .size-btn:hover {
+    background: #f0f0f0;
+  }
+
+  .size-display {
+    font-size: 13px;
+    min-width: 36px;
     text-align: center;
-    color: #999;
-    margin-top: 48px;
+    color: #555;
+  }
+
+  .divider {
+    width: 1px;
+    height: 20px;
+    background: #ddd;
+    margin: 0 2px;
+  }
+
+  .editor {
+    flex: 1;
+    min-height: 400px;
+    outline: none;
+    line-height: 1.5;
+    padding: 8px 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 18px;
+  }
+
+  .editor:empty::before {
+    content: "本文を入力...";
+    color: #bbb;
+    pointer-events: none;
   }
 </style>
