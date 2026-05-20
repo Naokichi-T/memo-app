@@ -1,7 +1,13 @@
 <script>
+  import favicon from "$lib/assets/favicon.svg";
   // 全ページ共通のレイアウト
   let { children } = $props();
 </script>
+
+<svelte:head>
+  <link rel="icon" href={favicon} />
+  <title>メモ帳</title>
+</svelte:head>
 
 {@render children()}
 
