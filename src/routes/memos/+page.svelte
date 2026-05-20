@@ -5,13 +5,12 @@
   // -----------------------------------------------
   // localStorageのキー定数
   // -----------------------------------------------
-  const STORAGE_KEY = "memo-open-tabs";
   const ACTIVE_TAB_KEY = "memo-active-tab"; // 最後にアクティブだったタブのID
 
   // -----------------------------------------------
   // タブ管理
   // -----------------------------------------------
-  // 開いているタブのリスト { id, title }
+  // 開いているタブのリスト { id, title, sort_order }
   let openTabs = $state([]);
 
   // アクティブなタブのID
@@ -63,27 +62,28 @@
   let activeSpan = null;
 
   // -----------------------------------------------
-  // localStorageにタブリストを保存する
+  // タブのドラッグ＆ドロップ管理
   // -----------------------------------------------
-  function saveTabsToStorage(tabs) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tabs));
-  }
+  // ドラッグ中のタブのindex
+  let dragIndex = $state(null);
+  // ドロップ先のindex
+  let dropIndex = $state(null);
 
   // -----------------------------------------------
-  // localStorageからタブリストを読み込む
+  // Supabaseから全メモを取得してタブに並べる
   // -----------------------------------------------
-  function loadTabsFromStorage() {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    try {
-      return JSON.parse(raw);
-    } catch {
+  async function loadAllMemos() {
+    const { data, error } = await supabase.from("memos").select("id, title, sort_order").order("sort_order", { ascending: true });
+
+    if (error) {
+      console.error("メモ一覧の取得に失敗しました", error);
       return [];
     }
+    return data;
   }
 
   // -----------------------------------------------
-  // Supabaseから1件のメモを取得してキャッシュに保存する
+  // Supabaseから1件のメモ本文を取得してキャッシュに保存する
   // -----------------------------------------------
   async function fetchAndCacheMemo(id) {
     // すでにキャッシュ済みならスキップ
@@ -101,9 +101,6 @@
       ...memoCache,
       [id]: { title: data.title ?? "", content: data.content ?? "" },
     };
-
-    // タブのタイトルも最新に更新する
-    openTabs = openTabs.map((t) => (t.id === id ? { ...t, title: data.title ?? "無題" } : t));
   }
 
   // -----------------------------------------------
@@ -114,13 +111,25 @@
       data: { session },
     } = await supabase.auth.getSession();
 
-    const { data, error } = await supabase.from("memos").insert({ title: "無題", content: "", user_id: session.user.id }).select("id").single();
+    // 現在の最大sort_orderを取得して+1する
+    const maxOrder = openTabs.length > 0 ? Math.max(...openTabs.map((t) => t.sort_order ?? 0)) : 0;
+
+    const { data, error } = await supabase
+      .from("memos")
+      .insert({
+        title: "無題",
+        content: "",
+        user_id: session.user.id,
+        sort_order: maxOrder + 1,
+      })
+      .select("id, title, sort_order")
+      .single();
 
     if (error) {
       console.error("新規メモの作成に失敗しました", error);
       return null;
     }
-    return data.id;
+    return data;
   }
 
   // -----------------------------------------------
@@ -169,32 +178,40 @@
   // ＋ボタン：新規メモを作成してタブに追加する
   // -----------------------------------------------
   async function addTab() {
-    const newId = await createNewMemo();
-    if (!newId) return;
+    const newMemo = await createNewMemo();
+    if (!newMemo) return;
 
     // キャッシュに空のメモを登録する
     memoCache = {
       ...memoCache,
-      [newId]: { title: "無題", content: "" },
+      [newMemo.id]: { title: "無題", content: "" },
     };
 
     // タブリストに追加する
-    openTabs = [...openTabs, { id: newId, title: "無題" }];
-    saveTabsToStorage(openTabs);
+    openTabs = [...openTabs, { id: newMemo.id, title: "無題", sort_order: newMemo.sort_order }];
 
     // 新しいタブに切り替える
-    switchTab(newId);
+    switchTab(newMemo.id);
   }
 
   // -----------------------------------------------
-  // ×ボタン：タブを閉じる
+  // ×ボタン：メモを削除してタブを閉じる
   // -----------------------------------------------
   async function closeTab(id) {
+    // 確認ダイアログを表示する
+    if (!confirm("このメモを削除しますか？")) return;
+
     const index = openTabs.findIndex((t) => t.id === id);
+
+    // Supabaseからメモを削除する
+    const { error } = await supabase.from("memos").delete().eq("id", id);
+    if (error) {
+      console.error("メモの削除に失敗しました", error);
+      return;
+    }
 
     // タブリストから削除する
     openTabs = openTabs.filter((t) => t.id !== id);
-    saveTabsToStorage(openTabs);
 
     // キャッシュからも削除する
     const { [id]: _, ...rest } = memoCache;
@@ -211,6 +228,74 @@
         switchTab(nextTab.id);
       }
     }
+  }
+
+  // -----------------------------------------------
+  // タブのドラッグ開始時の処理
+  // -----------------------------------------------
+  function handleTabDragStart(e, index) {
+    dragIndex = index;
+    e.dataTransfer.effectAllowed = "move";
+  }
+
+  // -----------------------------------------------
+  // タブのドラッグ中・別タブの上を通過したときの処理
+  // -----------------------------------------------
+  function handleTabDragOver(e, index) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    dropIndex = index;
+  }
+
+  // -----------------------------------------------
+  // タブのドラッグがタブバーから外れたときの処理
+  // -----------------------------------------------
+  function handleTabDragLeave() {
+    dropIndex = null;
+  }
+
+  // -----------------------------------------------
+  // タブのドロップ時の処理（順番を入れ替えてSupabaseに保存する）
+  // -----------------------------------------------
+  async function handleTabDrop(e, index) {
+    e.preventDefault();
+
+    if (dragIndex === null || dragIndex === index) {
+      dragIndex = null;
+      dropIndex = null;
+      return;
+    }
+
+    // タブの順番を入れ替える
+    const newTabs = [...openTabs];
+    const [moved] = newTabs.splice(dragIndex, 1);
+    newTabs.splice(index, 0, moved);
+
+    // sort_orderを1から振り直す
+    const updated = newTabs.map((t, i) => ({ ...t, sort_order: i + 1 }));
+    openTabs = updated;
+
+    dragIndex = null;
+    dropIndex = null;
+
+    // Supabaseにsort_orderを一括保存する
+    await saveSortOrder(updated);
+  }
+
+  // -----------------------------------------------
+  // タブのドラッグ終了時の処理（ドロップ外でも呼ばれる）
+  // -----------------------------------------------
+  function handleTabDragEnd() {
+    dragIndex = null;
+    dropIndex = null;
+  }
+
+  // -----------------------------------------------
+  // sort_orderをSupabaseに一括保存する
+  // -----------------------------------------------
+  async function saveSortOrder(tabs) {
+    const updates = tabs.map((t) => supabase.from("memos").update({ sort_order: t.sort_order }).eq("id", t.id));
+    await Promise.all(updates);
   }
 
   // -----------------------------------------------
@@ -240,23 +325,23 @@
       return;
     }
 
-    // localStorageからタブリストを復元する
-    let savedTabs = loadTabsFromStorage();
+    // Supabaseから全メモを取得してタブに並べる
+    const allMemos = await loadAllMemos();
 
-    // タブが0件なら新規メモを作成する
-    if (savedTabs.length === 0) {
-      const newId = await createNewMemo();
-      if (!newId) return;
-      savedTabs = [{ id: newId, title: "無題" }];
+    // メモが0件なら新規メモを作成する
+    if (allMemos.length === 0) {
+      await addTab();
+      return;
     }
 
-    openTabs = savedTabs;
-    saveTabsToStorage(openTabs);
+    openTabs = allMemos.map((m) => ({
+      id: m.id,
+      title: m.title ?? "無題",
+      sort_order: m.sort_order,
+    }));
 
     // 最後にアクティブだったタブのIDをlocalStorageから復元する
     const savedActiveId = localStorage.getItem(ACTIVE_TAB_KEY);
-
-    // localStorageの値は文字列なので数値に変換して比較する
     const savedActiveIdNum = savedActiveId ? Number(savedActiveId) : null;
     const initialId = savedActiveIdNum && openTabs.some((t) => t.id === savedActiveIdNum) ? savedActiveIdNum : openTabs[0].id;
 
@@ -355,7 +440,6 @@
 
     // タブのタイトルも更新する
     openTabs = openTabs.map((t) => (t.id === activeTabId ? { ...t, title: title || "無題" } : t));
-    saveTabsToStorage(openTabs);
 
     const { error } = await supabase
       .from("memos")
@@ -380,8 +464,24 @@
 
 <!-- タブバー -->
 <div class="tab-bar">
-  {#each openTabs as tab}
-    <button class="tab" class:active={tab.id === activeTabId} onclick={() => switchTab(tab.id)}>
+  {#each openTabs as tab, i}
+    <!-- ドロップ先インジケーター（タブの左側に縦線を表示） -->
+    {#if dropIndex === i && dragIndex !== i}
+      <div class="tab-drop-line"></div>
+    {/if}
+
+    <button
+      class="tab"
+      class:active={tab.id === activeTabId}
+      class:dragging={dragIndex === i}
+      draggable="true"
+      onclick={() => switchTab(tab.id)}
+      ondragstart={(e) => handleTabDragStart(e, i)}
+      ondragover={(e) => handleTabDragOver(e, i)}
+      ondragleave={handleTabDragLeave}
+      ondrop={(e) => handleTabDrop(e, i)}
+      ondragend={handleTabDragEnd}
+    >
       <span class="tab-title">{tab.title || "無題"}</span>
       <span
         class="tab-close"
@@ -401,6 +501,11 @@
       >
     </button>
   {/each}
+
+  <!-- 末尾のドロップ先インジケーター -->
+  {#if dropIndex === openTabs.length && dragIndex !== openTabs.length - 1}
+    <div class="tab-drop-line"></div>
+  {/if}
 
   <!-- ＋ボタン -->
   <button class="tab-add" onclick={addTab}>＋</button>
@@ -487,6 +592,11 @@
     background: #ececec;
   }
 
+  /* ドラッグ中のタブを半透明にする */
+  .tab.dragging {
+    opacity: 0.4;
+  }
+
   .tab-title {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -522,6 +632,15 @@
   .tab-close:hover {
     background: #ccc;
     color: #333;
+  }
+
+  /* ドロップ先を示す縦線 */
+  .tab-drop-line {
+    width: 2px;
+    height: 28px;
+    background: #4a90e2;
+    border-radius: 2px;
+    flex-shrink: 0;
   }
 
   .tab-add {
