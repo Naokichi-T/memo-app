@@ -511,6 +511,28 @@
   <button class="tab-add" onclick={addTab}>＋</button>
 </div>
 
+<!-- ツールバー（containerの外・タブバーの直下に固定） -->
+<div class="toolbar">
+  <!-- 太字ボタン -->
+  <button class="tool-btn bold-btn" onmousedown={(e) => e.preventDefault()} onclick={applyBold}>B</button>
+
+  <div class="divider"></div>
+
+  <!-- カラーパレット -->
+  {#each colors as color}
+    <button class="color-btn" style="background: {color.value}" title={color.label} onmousedown={(e) => e.preventDefault()} onclick={() => applyColor(color.value)}></button>
+  {/each}
+
+  <div class="divider"></div>
+
+  <!-- フォントサイズ -->
+  <div class="font-size-control">
+    <button class="size-btn" onmousedown={(e) => e.preventDefault()} onclick={() => applyFontSize(fontSize - 2)}>▼</button>
+    <span class="size-display">{fontSize}px</span>
+    <button class="size-btn" onmousedown={(e) => e.preventDefault()} onclick={() => applyFontSize(fontSize + 2)}>▲</button>
+  </div>
+</div>
+
 <!-- エディタエリア -->
 <div class="container">
   <header>
@@ -519,28 +541,6 @@
 
   <!-- タイトル入力 -->
   <input class="title-input" type="text" bind:value={title} placeholder="タイトルを入力" oninput={scheduleAutoSave} />
-
-  <!-- ツールバー -->
-  <div class="toolbar">
-    <!-- 太字ボタン -->
-    <button class="tool-btn bold-btn" onmousedown={(e) => e.preventDefault()} onclick={applyBold}>B</button>
-
-    <div class="divider"></div>
-
-    <!-- カラーパレット -->
-    {#each colors as color}
-      <button class="color-btn" style="background: {color.value}" title={color.label} onmousedown={(e) => e.preventDefault()} onclick={() => applyColor(color.value)}></button>
-    {/each}
-
-    <div class="divider"></div>
-
-    <!-- フォントサイズ -->
-    <div class="font-size-control">
-      <button class="size-btn" onmousedown={(e) => e.preventDefault()} onclick={() => applyFontSize(fontSize - 2)}>▼</button>
-      <span class="size-display">{fontSize}px</span>
-      <button class="size-btn" onmousedown={(e) => e.preventDefault()} onclick={() => applyFontSize(fontSize + 2)}>▲</button>
-    </div>
-  </div>
 
   <!-- エディタ本文 -->
   <div class="editor" role="textbox" aria-multiline="true" tabindex="0" bind:this={editorEl} contenteditable="true" oninput={scheduleAutoSave}></div>
@@ -696,17 +696,21 @@
     border-bottom: 1px solid #eee;
   }
 
-  /* ツールバー */
+  /* ツールバー：タブバーの直下に固定する */
   .toolbar {
     display: flex;
     align-items: center;
     gap: 6px;
     padding: 8px 12px;
     background: white;
-    border: 1px solid #eee;
-    border-radius: 8px;
-    margin-bottom: 12px;
+    border-bottom: 1px solid #eee;
+    /* border-radius は削除（固定時は角丸なしの方が自然） */
+    /* margin-bottom は削除（containerのpaddingで調整） */
     flex-wrap: wrap;
+    /* 画面上部に固定する（タブバーの高さ分だけ下にずらす） */
+    position: sticky;
+    top: 0px; /* タブバーのおおよその高さ */
+    z-index: 99;
   }
 
   .tool-btn {
